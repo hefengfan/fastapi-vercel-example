@@ -14,7 +14,6 @@ import logging
 import hashlib
 import base64
 import hmac
-import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,10 +23,10 @@ app = FastAPI()
 
 # 添加配置类来管理API配置
 class Config:
-    API_KEY = os.environ.get("API_KEY", "TkoWuEN8cpDJubb7Zfwxln16NQDZIc8z")  # 从环境变量获取，提供默认值
-    BASE_URL = os.environ.get("BASE_URL", "https://api-bj.wenxiaobai.com/api/v1.0")  # 从环境变量获取，提供默认值
-    BOT_ID = int(os.environ.get("BOT_ID", "200006"))  # 从环境变量获取，提供默认值
-    DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "DeepSeek-R1")  # 从环境变量获取，提供默认值
+    API_KEY = "TkoWuEN8cpDJubb7Zfwxln16NQDZIc8z"
+    BASE_URL = "https://api-bj.wenxiaobai.com/api/v1.0"
+    BOT_ID = 200006
+    DEFAULT_MODEL = "DeepSeek-R1"
 
 
 # 添加会话管理类
@@ -37,15 +36,13 @@ class SessionManager:
         self.token = None
         self.user_id = None
         self.conversation_id = None
-        self.lock = asyncio.Lock()  # 添加锁
 
-    async def initialize(self):
+    def initialize(self):
         """初始化会话"""
-        async with self.lock:
-            self.device_id = generate_device_id()
-            self.token, self.user_id = await get_auth_token(self.device_id)
-            self.conversation_id = await create_conversation(self.device_id, self.token, self.user_id)
-            logger.info(f"Session initialized: user_id={self.user_id}, conversation_id={self.conversation_id}")
+        self.device_id = generate_device_id()
+        self.token, self.user_id = get_auth_token(self.device_id)
+        self.conversation_id = create_conversation(self.device_id, self.token, self.user_id)
+        logger.info(f"Session initialized: user_id={self.user_id}, conversation_id={self.conversation_id}")
 
     def is_initialized(self):
         """检查会话是否已初始化"""
@@ -53,9 +50,8 @@ class SessionManager:
 
     async def refresh_if_needed(self):
         """如果需要，刷新会话"""
-        async with self.lock:
-            if not self.is_initialized():
-                await self.initialize()
+        if not self.is_initialized():
+            self.initialize()
 
 
 # 创建会话管理器实例
@@ -160,7 +156,7 @@ def create_common_headers(timestamp: str, digest: str, token: Optional[str] = No
     return headers
 
 
-async def get_auth_token(device_id: str) -> Tuple[str, str]:
+def get_auth_token(device_id: str) -> Tuple[str, str]:
     """获取认证令牌"""
     timestamp = generate_timestamp()
     payload = {
@@ -177,13 +173,12 @@ async def get_auth_token(device_id: str) -> Tuple[str, str]:
     headers = create_common_headers(timestamp, digest)
 
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{Config.BASE_URL}/user/sessions",
-                headers=headers,
-                content=data,
-                timeout=30
-            )
+        response = httpx.post(
+            f"{Config.BASE_URL}/user/sessions",
+            headers=headers,
+            content=data,
+            timeout=30
+        )
         response.raise_for_status()
         result = response.json()
         return result['data']['token'], result['data']['user']['id']
@@ -195,7 +190,7 @@ async def get_auth_token(device_id: str) -> Tuple[str, str]:
         raise HTTPException(status_code=500, detail="服务器返回了无效的认证数据")
 
 
-async def create_conversation(device_id: str, token: str, user_id: str) -> str:
+def create_conversation(device_id: str, token: str, user_id: str) -> str:
     """创建新的会话"""
     timestamp = generate_timestamp()
     payload = {'visitorId': device_id}
@@ -205,13 +200,12 @@ async def create_conversation(device_id: str, token: str, user_id: str) -> str:
     headers = create_common_headers(timestamp, digest, token, device_id)
 
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{Config.BASE_URL}/core/conversations/users/{user_id}/bots/{Config.BOT_ID}/conversation",
-                headers=headers,
-                content=data,
-                timeout=30
-            )
+        response = httpx.post(
+            f"{Config.BASE_URL}/core/conversations/users/{user_id}/bots/{Config.BOT_ID}/conversation",
+            headers=headers,
+            content=data,
+            timeout=30
+        )
         response.raise_for_status()
         return response.json()['data']
     except httpx.RequestError as e:
@@ -380,186 +374,258 @@ def process_generate_end_event(data: dict, in_thinking_block: bool, thinking_con
 async def generate_response(messages: List[dict], model: str, temperature: float, stream: bool,
                             max_tokens: Optional[int] = None, presence_penalty: float = 0,
                             frequency_penalty: float = 0, top_p: float = 1.0) -> AsyncGenerator[str, None]:
-    """生成响应"""
+    """生成响应 - 使用真正的流式处理"""
+    # 确保会话已初始化
     await session_manager.refresh_if_needed()
-    device_id = session_manager.device_id
-    token = session_manager.token
-    user_id = session_manager.user_id
-    conversation_id = session_manager.conversation_id
 
     timestamp = generate_timestamp()
-    history = []
-    for message in messages[:-1]:
-        history.append({
-            "role": message["role"],
-            "content": message["content"]
-        })
-
-    last_message = messages[-1]
     payload = {
-        "modelName": model,
-        "temperature": temperature,
-        "topP": top_p,
-        "maxTokens": max_tokens,
-        "presencePenalty": presence_penalty,
-        "frequencyPenalty": frequency_penalty,
-        "stream": stream,
-        "query": last_message["content"],
-        "userId": user_id,
-        "conversationId": conversation_id,
-        "history": history,
-        "botId": Config.BOT_ID,
-        "source": "web",
-        "clientVersion": "2.8.0",
-        "client": "browser"
+        'userId': session_manager.user_id,
+        'botId': Config.BOT_ID,
+        'botAlias': 'custom',
+        'query': messages[-1]['content'],
+        'isRetry': False,
+        'breakingStrategy': 0,
+        'isNewConversation': True,
+        'mediaInfos': [],
+        'turnIndex': 0,
+        'rewriteQuery': '',
+        'conversationId': session_manager.conversation_id,
+        'capabilities': [
+            {
+                'capability': 'otherBot',
+                'capabilityRang': 0,
+                'defaultQuery': '',
+                'icon': 'https://wy-static.wenxiaobai.com/bot-capability/prod/%E6%B7%B1%E5%BA%A6%E6%80%9D%E8%80%83.png',
+                'minAppVersion': '',
+                'title': '深度思考(R1)',
+                'botId': 210029,
+                'botDesc': '深度回答这个问题（DeepSeek R1）',
+                'selectedIcon': 'https://wy-static.wenxiaobai.com/bot-capability/prod/%E6%B7%B1%E5%BA%A6%E6%80%9D%E8%80%83%E9%80%89%E4%B8%AD.png',
+                'botIcon': 'https://platform-dev-1319140468.cos.ap-nanjing.myqcloud.com/bot/avatar/2025/02/06/612cbff8-51e6-4c6a-8530-cb551bcfda56.webp',
+                'defaultHidden': False,
+                'defaultSelected': False,
+                'key': 'deep_think',
+                'promptMenu': False,
+                'isPromptMenu': False,
+                'defaultPlaceholder': '',
+                '_id': 'deep_think',
+            },
+        ],
+        'attachmentInfo': {
+            'url': {
+                'infoList': [],
+            },
+        },
+        'inputWay': 'proactive',
+        'pureQuery': '',
     }
     data = json.dumps(payload, separators=(',', ':'))
     digest = calculate_sha256(data)
 
-    headers = create_common_headers(timestamp, digest, token, device_id)
-
-    url = f"{Config.BASE_URL}/core/conversations/{conversation_id}/bots/{Config.BOT_ID}/generate"
+    # 创建流式请求的特殊头部
+    headers = create_common_headers(timestamp, digest, session_manager.token, session_manager.device_id)
+    headers.update({
+        'accept': 'text/event-stream, text/event-stream',
+        'x-yuanshi-appversioncode': '',
+        'x-yuanshi-appversionname': '3.1.0',
+    })
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(url, headers=headers, content=data, stream=True)
-            response.raise_for_status()
+        # 使用 stream=True 参数，实现真正的流式处理
+        async with httpx.AsyncClient(timeout=httpx.Timeout(900)) as client:
+            async with client.stream('POST', f"{Config.BASE_URL}/core/conversation/chat/v1",
+                                     headers=headers, content=data) as response:
+                response.raise_for_status()
 
-            in_thinking_block = False
-            thinking_started = False
-            thinking_content = []
-            is_first_chunk = True
+                # 处理流式响应
+                is_first_chunk = True
+                current_event = None
+                in_thinking_block = False
+                thinking_content = []
+                thinking_started = False
 
-            async for chunk in response.aiter_bytes():
-                lines = chunk.decode('utf-8').splitlines()
-                for line in lines:
-                    if line.startswith("data:"):
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        current_event = None
+                        continue
+
+                    # 解析事件类型
+                    if line.startswith("event:"):
+                        current_event = line[len("event:"):].strip()
+                        continue
+
+                    # 处理数据行
+                    elif line.startswith("data:"):
+                        json_str = line[len("data:"):].strip()
                         try:
-                            json_str = line[5:]  # Remove "data:" prefix
-                            if json_str == "[DONE]":
-                                for done_event in process_generate_end_event({}, in_thinking_block, thinking_content):
-                                    yield done_event
-                                return
                             data = json.loads(json_str)
 
-                            if data["type"] == "message":
+                            # 处理消息事件
+                            if current_event == "message":
                                 result, in_thinking_block, thinking_started, is_first_chunk, thinking_content = await process_message_event(
-                                    data["data"], is_first_chunk, in_thinking_block, thinking_started, thinking_content)
+                                    data, is_first_chunk, in_thinking_block, thinking_started, thinking_content
+                                )
                                 if result:
                                     yield result
-                                is_first_chunk = False  # Ensure only the first message chunk is marked as first
 
-                            elif data["type"] == "generateEnd":
-                                for end_event in process_generate_end_event(data["data"], in_thinking_block, thinking_content):
-                                    yield end_event
-                                return
+                            # 处理生成结束事件
+                            elif current_event == "generateEnd":
+                                for chunk in process_generate_end_event(data, in_thinking_block, thinking_content):
+                                    yield chunk
 
                         except json.JSONDecodeError as e:
-                            logger.error(f"JSON decode error: {e}, line: {line}")
-                            continue  # Skip problematic line and continue processing
+                            logger.error(f"JSON解析错误: {e}")
+                            continue
 
     except httpx.RequestError as e:
-        logger.error(f"请求错误: {e}")
-        yield f"data: {json.dumps({'error': str(e)})}\n\n"
-        yield "data: [DONE]\n\n"
-    except Exception as e:
-        logger.exception(f"发生意外错误: {e}")
-        yield f"data: {json.dumps({'error': 'An unexpected error occurred'})}\n\n"
-        yield "data: [DONE]\n\n"
+        logger.error(f"生成响应错误: {e}")
+        # 尝试重新初始化会话
+        try:
+            session_manager.initialize()
+            logger.info("会话已重新初始化")
+        except Exception as re_init_error:
+            logger.error(f"重新初始化会话失败: {re_init_error}")
+        raise HTTPException(status_code=500, detail=f"请求错误: {str(e)}")
 
+@app.get("/")
+async def mainly():
+    return {"status": "ok"}
 
 @app.get("/v1/models")
-async def list_models(api_key: str = Header(None)):
+async def list_models():
     """列出可用模型"""
-    await verify_api_key(api_key)
-
-    model_data = [
+    current_time = int(time.time())
+    models_data = [
         ModelData(
             id=Config.DEFAULT_MODEL,
-            created=int(time.time()),
-            owned_by="wenxiaobai"
+            created=current_time,
+            owned_by="wenxiaobai",
+            root=Config.DEFAULT_MODEL,
+            permission=[{
+                "id": f"modelperm-{Config.DEFAULT_MODEL}",
+                "object": "model_permission",
+                "created": current_time,
+                "allow_create_engine": False,
+                "allow_sampling": True,
+                "allow_logprobs": True,
+                "allow_search_indices": False,
+                "allow_view": True,
+                "allow_fine_tuning": False,
+                "organization": "wenxiaobai",
+                "group": None,
+                "is_blocking": False
+            }]
         )
     ]
-    return {"data": model_data}
+
+    return {"object": "list", "data": models_data}
 
 
 @app.post("/v1/chat/completions")
-async def create_chat_completion(request: ChatCompletionRequest, authorization: str = Header(None)):
-    """创建聊天补全"""
+async def chat_completions(request: ChatCompletionRequest, authorization: str = Header(None)):
+    """处理聊天完成请求"""
+    # 验证 API 密钥
     await verify_api_key(authorization)
 
-    if request.stream:
-        return StreamingResponse(
-            generate_response(
-                messages=[message.dict() for message in request.messages],
+    # 添加请求日志
+    logger.info(f"Received chat request: model={request.model}, stream={request.stream}")
+
+    messages = [msg.model_dump() for msg in request.messages]
+
+    if not request.stream:
+        # 非流式响应处理
+        content = ""
+        thinking_content = ""
+        meta = None
+        in_thinking = False
+
+        async for chunk_str in generate_response(
+                messages=messages,
                 model=request.model,
                 temperature=request.temperature,
-                stream=request.stream,
+                stream=True,  # 内部仍使用流式处理
                 max_tokens=request.max_tokens,
                 presence_penalty=request.presence_penalty,
                 frequency_penalty=request.frequency_penalty,
                 top_p=request.top_p
-            ),
-            media_type="text/event-stream"
-        )
-    else:
-        full_response_content = ""
-        async for response_chunk in generate_response(
-            messages=[message.dict() for message in request.messages],
-            model=request.model,
-            temperature=request.temperature,
-            stream=True,
-            max_tokens=request.max_tokens,
-            presence_penalty=request.presence_penalty,
-            frequency_penalty=request.frequency_penalty,
-            top_p=request.top_p
         ):
-            # Extract and append content from each chunk
             try:
-                if response_chunk.startswith("data:"):
-                    json_str = response_chunk[5:].strip()
-                    if json_str == "[DONE]":
-                        break  # End of stream
-                    data = json.loads(json_str)
-                    if "choices" in data and len(data["choices"]) > 0:
-                        delta = data["choices"][0].get("delta", {})
-                        content = delta.get("content", "")
-                        full_response_content += content
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON decode error: {e}, chunk: {response_chunk}")
-                continue
+                if chunk_str.startswith("data: ") and not chunk_str.startswith("data: [DONE]"):
+                    chunk = json.loads(chunk_str[len("data: "):])
+                    if "choices" in chunk and chunk["choices"]:
+                        delta = chunk["choices"][0]["delta"]
+                        if "content" in delta:
+                            content_part = delta["content"]
 
-        # Construct the final response object
-        response_data = {
+                            # 处理思考块标记
+                            if content_part == "<think>\n\n":
+                                in_thinking = True
+                                continue
+                            elif content_part == "\n</think>\n\n":
+                                in_thinking = False
+                                continue
+
+                            # 收集内容
+                            if in_thinking:
+                                thinking_content += content_part
+                            else:
+                                content += content_part
+
+                        # 收集元数据
+                        if "meta" in delta:
+                            meta = delta["meta"]
+            except Exception as e:
+                logger.error(f"处理非流式响应错误: {e}")
+
+        # 构建完整响应
+        return {
             "id": str(uuid.uuid4()),
             "object": "chat.completion",
             "created": int(time.time()),
             "model": request.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": full_response_content
-                    },
-                    "finish_reason": "stop"
-                }
-            ],
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0
-            }
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": f"<think>\n{thinking_content}\n</think>" if thinking_content else None,
+                    "content": content,
+                    "meta": meta
+                },
+                "finish_reason": "stop"
+            }]
         }
-        return response_data
+
+    # 流式响应
+    return StreamingResponse(
+        generate_response(
+            messages=messages,
+            model=request.model,
+            temperature=request.temperature,
+            stream=request.stream,
+            max_tokens=request.max_tokens,
+            presence_penalty=request.presence_penalty,
+            frequency_penalty=request.frequency_penalty,
+            top_p=request.top_p
+        ),
+        media_type="text/event-stream"
+    )
 
 
 @app.on_event("startup")
 async def startup_event():
-    """在应用启动时初始化会话"""
+    """应用启动时初始化会话"""
     try:
-        await session_manager.initialize()
-        logger.info("应用启动时会话初始化完成")
+        session_manager.initialize()
     except Exception as e:
-        logger.error(f"应用启动时会话初始化失败: {e}")
+        logger.error(f"启动初始化错误: {e}")
+        raise
 
+
+@app.get("/health")
+async def health_check():
+    """健康检查端点"""
+    if session_manager.is_initialized():
+        return {"status": "ok", "session": "active"}
+    else:
+        return {"status": "degraded", "session": "inactive"}
