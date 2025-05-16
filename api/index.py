@@ -489,6 +489,9 @@ async def generate_response(messages: List[dict], model: str, temperature: float
             logger.error(f"重新初始化会话失败: {re_init_error}")
         raise HTTPException(status_code=500, detail=f"请求错误: {str(e)}")
 
+@app.get("/")
+async def mainly():
+    return {"status": "ok"}
 
 @app.get("/v1/models")
 async def list_models():
