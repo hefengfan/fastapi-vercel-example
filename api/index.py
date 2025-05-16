@@ -48,21 +48,13 @@ class SessionManager:
         self.token = None
         self.user_id = None
         self.conversation_id = None
-        self._lock = asyncio.Lock()  # 添加异步锁防止并发问题
-        self._last_refresh = 0  # 记录最后刷新时间
 
-    async def initialize(self):
+    def initialize(self):
         """初始化会话"""
-        async with self._lock:
-            try:
-                self.device_id = generate_device_id()
-                self.token, self.user_id = await get_auth_token(self.device_id)
-                self.conversation_id = await create_conversation(self.device_id, self.token, self.user_id)
-                self._last_refresh = time.time()
-                logger.info(f"Session initialized: user_id={self.user_id}, conversation_id={self.conversation_id}")
-            except Exception as e:
-                logger.error(f"Session initialization failed: {e}")
-                raise
+        self.device_id = generate_device_id()
+        self.token, self.user_id = get_auth_token(self.device_id)
+        self.conversation_id = create_conversation(self.device_id, self.token, self.user_id)
+        logger.info(f"Session initialized: user_id={self.user_id}, conversation_id={self.conversation_id}")
 
     def is_initialized(self):
         """检查会话是否已初始化"""
@@ -70,17 +62,10 @@ class SessionManager:
 
     async def refresh_if_needed(self):
         """如果需要，刷新会话"""
-        if not self.is_initialized() or (time.time() - self._last_refresh) > 3600:  # 1小时刷新一次
-            await self.initialize()
+        if not self.is_initialized():
+            self.initialize()
 
-    async def reset(self):
-        """重置会话"""
-        async with self._lock:
-            self.device_id = None
-            self.token = None
-            self.user_id = None
-            self.conversation_id = None
-            self._last_refresh = 0
+
 # 创建会话管理器实例
 session_manager = SessionManager()
 
@@ -184,7 +169,6 @@ def create_common_headers(timestamp: str, digest: str, token: Optional[str] = No
 
 
 def get_auth_token(device_id: str) -> Tuple[str, str]:
-async def get_auth_token(device_id: str) -> Tuple[str, str]:
     """获取认证令牌"""
     timestamp = generate_timestamp()
     payload = {
@@ -201,16 +185,15 @@ async def get_auth_token(device_id: str) -> Tuple[str, str]:
     headers = create_common_headers(timestamp, digest)
 
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{Config.BASE_URL}/user/sessions",
-                headers=headers,
-                content=data,
-                timeout=30
-            )
-            response.raise_for_status()
-            result = response.json()
-            return result['data']['token'], result['data']['user']['id']
+        response = httpx.post(
+            f"{Config.BASE_URL}/user/sessions",
+            headers=headers,
+            content=data,
+            timeout=30
+        )
+        response.raise_for_status()
+        result = response.json()
+        return result['data']['token'], result['data']['user']['id']
     except httpx.RequestError as e:
         logger.error(f"获取认证令牌失败: {e}")
         raise HTTPException(status_code=500, detail=f"认证失败: {str(e)}")
@@ -218,31 +201,6 @@ async def get_auth_token(device_id: str) -> Tuple[str, str]:
         logger.error(f"解析认证响应失败: {e}")
         raise HTTPException(status_code=500, detail="服务器返回了无效的认证数据")
 
-async def create_conversation(device_id: str, token: str, user_id: str) -> str:
-    """创建新的会话"""
-    timestamp = generate_timestamp()
-    payload = {'visitorId': device_id}
-    data = json.dumps(payload, separators=(',', ':'))
-    digest = calculate_sha256(data)
-
-    headers = create_common_headers(timestamp, digest, token, device_id)
-
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{Config.BASE_URL}/core/conversations/users/{user_id}/bots/{Config.BOT_ID}/conversation",
-                headers=headers,
-                content=data,
-                timeout=30
-            )
-            response.raise_for_status()
-            return response.json()['data']
-    except httpx.RequestError as e:
-        logger.error(f"创建会话失败: {e}")
-        raise HTTPException(status_code=500, detail=f"创建会话失败: {str(e)}")
-    except (KeyError, json.JSONDecodeError) as e:
-        logger.error(f"解析会话响应失败: {e}")
-        raise HTTPException(status_code=500, detail="服务器返回了无效的会话数据")
 
 def create_conversation(device_id: str, token: str, user_id: str) -> str:
     """创建新的会话"""
@@ -543,9 +501,6 @@ async def generate_response(messages: List[dict], model: str, temperature: float
             logger.error(f"重新初始化会话失败: {re_init_error}")
         raise HTTPException(status_code=500, detail=f"请求错误: {str(e)}")
 
-@app.get("/")
-async def mainly():
-    return {"status": "ok"}
 
 @app.get("/v1/models")
 async def list_models():
@@ -683,3 +638,4 @@ async def health_check():
         return {"status": "ok", "session": "active"}
     else:
         return {"status": "degraded", "session": "inactive"}
+
