@@ -445,7 +445,7 @@ async def generate_response(messages: List[dict], model: str, temperature: float
 
     try:
         # 使用 stream=True 参数，实现真正的流式处理
-        async with httpx.AsyncClient(timeout=httpx.Timeout(65536)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10)) as client:
             async with client.stream('POST', f"{Config.BASE_URL}/core/conversation/chat/v1",
                                      headers=headers, content=data) as response:
                 response.raise_for_status()
