@@ -14,7 +14,7 @@ import logging
 import hashlib
 import base64
 import hmac
-import os  # Import the 'os' module
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,10 +24,10 @@ app = FastAPI()
 
 # 添加配置类来管理API配置
 class Config:
-    API_KEY = os.environ.get("API_KEY", "TkoWuEN8cpDJubb7Zfwxln16NQDZIc8z")  # Use environment variable
-    BASE_URL = os.environ.get("BASE_URL", "https://api-bj.wenxiaobai.com/api/v1.0")  # Use environment variable
-    BOT_ID = int(os.environ.get("BOT_ID", "200006"))  # Use environment variable
-    DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "DeepSeek-R1")  # Use environment variable
+    API_KEY = os.environ.get("API_KEY", "TkoWuEN8cpDJubb7Zfwxln16NQDZIc8z")  # 从环境变量获取，提供默认值
+    BASE_URL = os.environ.get("BASE_URL", "https://api-bj.wenxiaobai.com/api/v1.0")  # 从环境变量获取，提供默认值
+    BOT_ID = int(os.environ.get("BOT_ID", "200006"))  # 从环境变量获取，提供默认值
+    DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "DeepSeek-R1")  # 从环境变量获取，提供默认值
 
 
 # 添加会话管理类
@@ -37,11 +37,11 @@ class SessionManager:
         self.token = None
         self.user_id = None
         self.conversation_id = None
-        self.lock = asyncio.Lock()  # Add a lock for thread safety
+        self.lock = asyncio.Lock()  # 添加锁
 
     async def initialize(self):
         """初始化会话"""
-        async with self.lock:  # Acquire the lock
+        async with self.lock:
             self.device_id = generate_device_id()
             self.token, self.user_id = await get_auth_token(self.device_id)
             self.conversation_id = await create_conversation(self.device_id, self.token, self.user_id)
@@ -53,8 +53,9 @@ class SessionManager:
 
     async def refresh_if_needed(self):
         """如果需要，刷新会话"""
-        if not self.is_initialized():
-            await self.initialize()
+        async with self.lock:
+            if not self.is_initialized():
+                await self.initialize()
 
 
 # 创建会话管理器实例
@@ -183,9 +184,9 @@ async def get_auth_token(device_id: str) -> Tuple[str, str]:
                 content=data,
                 timeout=30
             )
-            response.raise_for_status()
-            result = response.json()
-            return result['data']['token'], result['data']['user']['id']
+        response.raise_for_status()
+        result = response.json()
+        return result['data']['token'], result['data']['user']['id']
     except httpx.RequestError as e:
         logger.error(f"获取认证令牌失败: {e}")
         raise HTTPException(status_code=500, detail=f"认证失败: {str(e)}")
@@ -211,8 +212,8 @@ async def create_conversation(device_id: str, token: str, user_id: str) -> str:
                 content=data,
                 timeout=30
             )
-            response.raise_for_status()
-            return response.json()['data']
+        response.raise_for_status()
+        return response.json()['data']
     except httpx.RequestError as e:
         logger.error(f"创建会话失败: {e}")
         raise HTTPException(status_code=500, detail=f"创建会话失败: {str(e)}")
@@ -376,158 +377,189 @@ def process_generate_end_event(data: dict, in_thinking_block: bool, thinking_con
     return result
 
 
-async def generate_response(messages: List[dict], model: str, temperature: float, stream:bool, top_p: float, device_id: str, token: str, user_id: str, conversation_id: str) -> AsyncGenerator[str, None]:
+async def generate_response(messages: List[dict], model: str, temperature: float, stream: bool,
+                            max_tokens: Optional[int] = None, presence_penalty: float = 0,
+                            frequency_penalty: float = 0, top_p: float = 1.0) -> AsyncGenerator[str, None]:
     """生成响应"""
+    await session_manager.refresh_if_needed()
+    device_id = session_manager.device_id
+    token = session_manager.token
+    user_id = session_manager.user_id
+    conversation_id = session_manager.conversation_id
+
     timestamp = generate_timestamp()
-    messages_data = [{'role': msg['role'], 'content': msg['content']} for msg in messages]
+    history = []
+    for message in messages[:-1]:
+        history.append({
+            "role": message["role"],
+            "content": message["content"]
+        })
+
+    last_message = messages[-1]
     payload = {
-        'temperature': temperature,
-        'top_p': top_p,
-        'model': model,
-        'messages': messages_data,
-        'stream': stream,
-        'conversationId': conversation_id,
-        'botId': Config.BOT_ID,
+        "modelName": model,
+        "temperature": temperature,
+        "topP": top_p,
+        "maxTokens": max_tokens,
+        "presencePenalty": presence_penalty,
+        "frequencyPenalty": frequency_penalty,
+        "stream": stream,
+        "query": last_message["content"],
+        "userId": user_id,
+        "conversationId": conversation_id,
+        "history": history,
+        "botId": Config.BOT_ID,
+        "source": "web",
+        "clientVersion": "2.8.0",
+        "client": "browser"
     }
     data = json.dumps(payload, separators=(',', ':'))
     digest = calculate_sha256(data)
 
     headers = create_common_headers(timestamp, digest, token, device_id)
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        try:
-            response = await client.post(
-                f"{Config.BASE_URL}/core/conversations/users/{user_id}/bots/{Config.BOT_ID}/generate",
-                headers=headers,
-                content=data,
-                stream=True  # 使用流式传输
-            )
+    url = f"{Config.BASE_URL}/core/conversations/{conversation_id}/bots/{Config.BOT_ID}/generate"
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(url, headers=headers, content=data, stream=True)
             response.raise_for_status()
-            is_first_chunk = True
+
             in_thinking_block = False
             thinking_started = False
             thinking_content = []
+            is_first_chunk = True
 
             async for chunk in response.aiter_bytes():
                 lines = chunk.decode('utf-8').splitlines()
                 for line in lines:
-                    try:
-                        if not line:
-                            continue
+                    if line.startswith("data:"):
+                        try:
+                            json_str = line[5:]  # Remove "data:" prefix
+                            if json_str == "[DONE]":
+                                for done_event in process_generate_end_event({}, in_thinking_block, thinking_content):
+                                    yield done_event
+                                return
+                            data = json.loads(json_str)
 
-                        event = json.loads(line)
+                            if data["type"] == "message":
+                                result, in_thinking_block, thinking_started, is_first_chunk, thinking_content = await process_message_event(
+                                    data["data"], is_first_chunk, in_thinking_block, thinking_started, thinking_content)
+                                if result:
+                                    yield result
+                                is_first_chunk = False  # Ensure only the first message chunk is marked as first
 
-                        if event['type'] == 'message':
-                            result, in_thinking_block, thinking_started, is_first_chunk, thinking_content = await process_message_event(
-                                event['data'], is_first_chunk, in_thinking_block, thinking_started, thinking_content
-                            )
-                            if result:
-                                yield result
+                            elif data["type"] == "generateEnd":
+                                for end_event in process_generate_end_event(data["data"], in_thinking_block, thinking_content):
+                                    yield end_event
+                                return
 
-                        elif event['type'] == 'generateEnd':
-                            for r in process_generate_end_event(event['data'], in_thinking_block, thinking_content):
-                                yield r
-                        else:
-                            logger.warning(f"未知的事件类型: {event['type']}")
+                        except json.JSONDecodeError as e:
+                            logger.error(f"JSON decode error: {e}, line: {line}")
+                            continue  # Skip problematic line and continue processing
 
-                    except json.JSONDecodeError as e:
-                        logger.error(f"JSON解码错误: {e}, 行内容: {line}")
-                        yield f"data: {json.dumps({'error': 'JSON解码错误'})}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
-                    except Exception as e:
-                        logger.error(f"处理事件时发生错误: {e}")
-                        yield f"data: {json.dumps({'error': str(e)})}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
-
-        except httpx.TimeoutException:
-            logger.error("请求超时")
-            yield f"data: {json.dumps({'error': '请求超时'})}\n\n"
-            yield "data: [DONE]\n\n"
-        except httpx.RequestError as e:
-            logger.error(f"请求错误: {e}")
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-            yield "data: [DONE]\n\n"
-        except Exception as e:
-            logger.error(f"发生未知错误: {e}")
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-            yield "data: [DONE]\n\n"
+    except httpx.RequestError as e:
+        logger.error(f"请求错误: {e}")
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        yield "data: [DONE]\n\n"
+    except Exception as e:
+        logger.exception(f"发生意外错误: {e}")
+        yield f"data: {json.dumps({'error': 'An unexpected error occurred'})}\n\n"
+        yield "data: [DONE]\n\n"
 
 
 @app.get("/v1/models")
 async def list_models(api_key: str = Header(None)):
     """列出可用模型"""
     await verify_api_key(api_key)
-    model_data = ModelData(
-        id=Config.DEFAULT_MODEL,
-        created=int(time.time()),
-        owned_by="wenxiaobai"
-    )
-    return {"data": [model_data]}
+
+    model_data = [
+        ModelData(
+            id=Config.DEFAULT_MODEL,
+            created=int(time.time()),
+            owned_by="wenxiaobai"
+        )
+    ]
+    return {"data": model_data}
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest, api_key: str = Header(None)):
+async def create_chat_completion(request: ChatCompletionRequest, authorization: str = Header(None)):
     """创建聊天补全"""
-    await verify_api_key(api_key)
-
-    # 检查会话是否已初始化，如果未初始化则刷新
-    await session_manager.refresh_if_needed()
-
-    if not session_manager.is_initialized():
-        raise HTTPException(status_code=500, detail="Session initialization failed.")
+    await verify_api_key(authorization)
 
     if request.stream:
         return StreamingResponse(
             generate_response(
-                request.messages,
-                request.model,
-                request.temperature,
-                True,
-                request.top_p,
-                session_manager.device_id,
-                session_manager.token,
-                session_manager.user_id,
-                session_manager.conversation_id
+                messages=[message.dict() for message in request.messages],
+                model=request.model,
+                temperature=request.temperature,
+                stream=request.stream,
+                max_tokens=request.max_tokens,
+                presence_penalty=request.presence_penalty,
+                frequency_penalty=request.frequency_penalty,
+                top_p=request.top_p
             ),
             media_type="text/event-stream"
         )
     else:
         full_response_content = ""
         async for response_chunk in generate_response(
-            request.messages,
-            request.model,
-            request.temperature,
-            False,
-            request.top_p,
-            session_manager.device_id,
-            session_manager.token,
-            session_manager.user_id,
-            session_manager.conversation_id
+            messages=[message.dict() for message in request.messages],
+            model=request.model,
+            temperature=request.temperature,
+            stream=True,
+            max_tokens=request.max_tokens,
+            presence_penalty=request.presence_penalty,
+            frequency_penalty=request.frequency_penalty,
+            top_p=request.top_p
         ):
+            # Extract and append content from each chunk
             try:
-                chunk = json.loads(response_chunk.replace("data: ", ""))
-                if 'choices' in chunk and len(chunk['choices']) > 0:
-                    delta = chunk['choices'][0]['delta']
-                    if 'content' in delta:
-                        full_response_content += delta['content']
+                if response_chunk.startswith("data:"):
+                    json_str = response_chunk[5:].strip()
+                    if json_str == "[DONE]":
+                        break  # End of stream
+                    data = json.loads(json_str)
+                    if "choices" in data and len(data["choices"]) > 0:
+                        delta = data["choices"][0].get("delta", {})
+                        content = delta.get("content", "")
+                        full_response_content += content
             except json.JSONDecodeError as e:
-                logger.error(f"JSON解码错误: {e}, 响应内容: {response_chunk}")
-                raise HTTPException(status_code=500, detail="JSON解码错误")
+                logger.error(f"JSON decode error: {e}, chunk: {response_chunk}")
+                continue
 
-        return {"choices": [{"message": {"content": full_response_content}}]}
+        # Construct the final response object
+        response_data = {
+            "id": str(uuid.uuid4()),
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": request.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": full_response_content
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
+        }
+        return response_data
 
 
 @app.on_event("startup")
 async def startup_event():
     """在应用启动时初始化会话"""
-    logger.info("Starting up and initializing session...")
-    await session_manager.initialize()
-    logger.info("Session initialization complete.")
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    try:
+        await session_manager.initialize()
+        logger.info("应用启动时会话初始化完成")
+    except Exception as e:
+        logger.error(f"应用启动时会话初始化失败: {e}")
 
