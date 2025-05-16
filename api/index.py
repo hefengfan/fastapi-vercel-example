@@ -445,7 +445,7 @@ async def generate_response(messages: List[dict], model: str, temperature: float
 
     try:
         # 使用 stream=True 参数，实现真正的流式处理
-        async with httpx.AsyncClient(timeout=httpx.Timeout(900)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(65536)) as client:
             async with client.stream('POST', f"{Config.BASE_URL}/core/conversation/chat/v1",
                                      headers=headers, content=data) as response:
                 response.raise_for_status()
@@ -608,12 +608,6 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
         }
 
     # 流式响应
-    headers = {
-        "X-Accel-Buffering": "no",  # 禁用 Nginx 代理缓冲
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "Keep-Alive": "timeout=60, max=1000"  # 长连接参数
-    }
     return StreamingResponse(
         generate_response(
             messages=messages,
@@ -626,6 +620,12 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
             top_p=request.top_p
         ),
         media_type="text/event-stream"
+        headers = {
+            "X-Accel-Buffering": "no",  # 禁用 Nginx 代理缓冲
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Keep-Alive": "timeout=60, max=1000"  # 长连接参数
+        }
     )
 
 
