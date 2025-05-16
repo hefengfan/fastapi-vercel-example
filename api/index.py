@@ -390,13 +390,16 @@ def process_generate_end_event(data: dict, in_thinking_block: bool, thinking_con
     # 发送 [DONE] 标记
     result.append("data: [DONE]\n\n")
     return result
-
 async def generate_response(messages: List[dict], model: str, temperature: float, stream: bool,
                             max_tokens: Optional[int] = None, presence_penalty: float = 0,
                             frequency_penalty: float = 0, top_p: float = 1.0) -> AsyncGenerator[str, None]:
     """生成响应 - 使用真正的流式处理"""
     # 确保会话已初始化
-    await session_manager.refresh_if_needed()
+    try:
+        await session_manager.refresh_if_needed()
+    except Exception as e:
+        logger.error(f"刷新会话失败: {e}")
+        raise HTTPException(status_code=500, detail=f"刷新会话失败: {str(e)}")
 
     timestamp = generate_timestamp()
     payload = {
@@ -451,19 +454,18 @@ async def generate_response(messages: List[dict], model: str, temperature: float
         'x-yuanshi-appversionname': '3.1.0',
     })
 
+    is_first_chunk = True
+    current_event = None
+    in_thinking_block = False
+    thinking_content = []
+    thinking_started = False
+
     try:
         # 使用 stream=True 参数，实现真正的流式处理
         async with httpx.AsyncClient(timeout=httpx.Timeout(10)) as client:
             async with client.stream('POST', f"{Config.BASE_URL}/core/conversation/chat/v1",
                                      headers=headers, content=data) as response:
-                response.raise_for_status()
-
-                # 处理流式响应
-                is_first_chunk = True
-                current_event = None
-                in_thinking_block = False
-                thinking_content = []
-                thinking_started = False
+                response.raise_for_status()  # 立即检查 HTTP 错误
 
                 async for line in response.aiter_lines():
                     line = line.strip()
@@ -484,31 +486,66 @@ async def generate_response(messages: List[dict], model: str, temperature: float
 
                             # 处理消息事件
                             if current_event == "message":
-                                result, in_thinking_block, thinking_started, is_first_chunk, thinking_content = await process_message_event(
-                                    data, is_first_chunk, in_thinking_block, thinking_started, thinking_content
-                                )
-                                if result:
-                                    yield result
+                                try:
+                                    result, in_thinking_block, thinking_started, is_first_chunk, thinking_content = await process_message_event(
+                                        data, is_first_chunk, in_thinking_block, thinking_started, thinking_content
+                                    )
+                                    if result:
+                                        yield result
+                                except Exception as e:
+                                    logger.error(f"处理消息事件时发生错误: {e}")
+                                    yield create_error_chunk(f"处理消息事件时发生错误: {e}") # 返回错误块
+                                    break  # 停止流
 
                             # 处理生成结束事件
                             elif current_event == "generateEnd":
-                                for chunk in process_generate_end_event(data, in_thinking_block, thinking_content):
-                                    yield chunk
+                                try:
+                                    for chunk in process_generate_end_event(data, in_thinking_block, thinking_content):
+                                        yield chunk
+                                except Exception as e:
+                                    logger.error(f"处理生成结束事件时发生错误: {e}")
+                                    yield create_error_chunk(f"处理生成结束事件时发生错误: {e}") # 返回错误块
+                                    break # 停止流
 
                         except json.JSONDecodeError as e:
                             logger.error(f"JSON解析错误: {e}")
-                            continue
+                            yield create_error_chunk(f"JSON解析错误: {e}") # 返回错误块
+                            break # 停止流
 
     except httpx.RequestError as e:
         logger.error(f"生成响应错误: {e}")
+        yield create_error_chunk(f"请求错误: {str(e)}") # 返回错误块
+
         # 尝试重新初始化会话
         try:
-            session_manager.initialize()
+            await session_manager.initialize()
             logger.info("会话已重新初始化")
         except Exception as re_init_error:
             logger.error(f"重新初始化会话失败: {re_init_error}")
-        raise HTTPException(status_code=500, detail=f"请求错误: {str(e)}")
+            yield create_error_chunk(f"重新初始化会话失败: {str(re_init_error)}") # 返回错误块
+        # 不再抛出 HTTPException，而是尝试返回错误信息
+        yield "data: [DONE]\n\n" # 确保流结束
+        return
+    except Exception as e:
+        logger.error(f"其他错误: {e}")
+        yield create_error_chunk(f"其他错误: {str(e)}") # 返回错误块
+        yield "data: [DONE]\n\n" # 确保流结束
+        return
 
+    yield "data: [DONE]\n\n" # 确保流结束
+
+def create_error_chunk(error_message: str) -> str:
+    """创建包含错误信息的 SSE 数据块"""
+    error_data = {
+        "error": {
+            "message": error_message,
+            "type": "api_error",
+            "code": "internal_error",
+        }
+    }
+    return f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+
+            
 @app.get("/")
 async def hff():
     return {"status": "ok", "提示": "hefengfan接口已成功部署！"}
