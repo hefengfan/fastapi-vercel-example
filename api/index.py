@@ -620,12 +620,6 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
             top_p=request.top_p
         ),
         media_type="text/event-stream"
-        headers = {
-            "X-Accel-Buffering": "no",  # 禁用 Nginx 代理缓冲
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Keep-Alive": "timeout=60, max=1000"  # 长连接参数
-        }
     )
 
 
