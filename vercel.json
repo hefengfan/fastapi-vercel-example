@@ -1,10 +1,4 @@
 {
-  "functions": {
-    "api/*.py": {
-      "maxDuration": 65536
-    }
-  }
-
   "builds": [
     {
       "src": "api/index.py",
