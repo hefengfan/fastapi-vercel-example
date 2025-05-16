@@ -256,6 +256,20 @@ async def verify_api_key(authorization: str = Header(None)):
         raise HTTPException(status_code=401, detail="Invalid API key")
     return api_key
 
+import json
+import time
+import uuid
+from typing import List, Tuple, Optional
+
+# 假设你已经有了这些函数和配置
+# from .utils import generate_timestamp, calculate_sha256, create_common_headers
+# from .config import Config
+# from .session_manager import session_manager
+# import httpx
+# from fastapi import HTTPException
+# import logging
+# logger = logging.getLogger(__name__)
+
 
 def create_chunk(sse_id: str, created: int, content: Optional[str] = None,
                  is_first: bool = False, meta: Optional[dict] = None,
@@ -272,7 +286,7 @@ def create_chunk(sse_id: str, created: int, content: Optional[str] = None,
     if meta is not None:
         delta["meta"] = meta
 
-    return {
+    chunk = {
         "id": f"chatcmpl-{sse_id}",
         "object": "chat.completion.chunk",
         "created": created,
@@ -284,68 +298,78 @@ def create_chunk(sse_id: str, created: int, content: Optional[str] = None,
         }]
     }
 
+    # 移除 delta 为空的键
+    chunk["choices"][0] = {k: v for k, v in chunk["choices"][0].items() if v is not None}
+    return chunk
+
 
 async def process_message_event(data: dict, is_first_chunk: bool, in_thinking_block: bool,
                                 thinking_started: bool, thinking_content: list) -> Tuple[str, bool, bool, bool, list]:
     """处理消息事件"""
-    content = data.get("content", "")
-    timestamp = data.get("timestamp", "")
-    created = int(timestamp) // 1000 if timestamp else int(time.time())
-    sse_id = data.get('sseId', str(uuid.uuid4()))
-    result = ""
+    try:
+        content = data.get("content", "")
+        timestamp = data.get("timestamp", "")
+        created = int(timestamp) // 1000 if timestamp else int(time.time())
+        sse_id = data.get('sseId', str(uuid.uuid4()))
+        result = ""
 
-    # 检查是否是思考块的开始
-    if "```ys_think" in content and not thinking_started:
-        thinking_started = True
-        in_thinking_block = True
-        # 发送思考块开始标记
+        # 检查是否是思考块的开始
+        if "```ys_think" in content and not thinking_started:
+            thinking_started = True
+            in_thinking_block = True
+            # 发送思考块开始标记
+            chunk = create_chunk(
+                sse_id=sse_id,
+                created=created,
+                content="<think>\n\n",
+                is_first=is_first_chunk
+            )
+            result = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            return result, in_thinking_block, thinking_started, is_first_chunk, thinking_content
+
+        # 检查是否是思考块的结束
+        if "```" in content and in_thinking_block:
+            in_thinking_block = False
+            # 发送思考块结束标记
+            chunk = create_chunk(
+                sse_id=sse_id,
+                created=created,
+                content="\n</think>\n\n"
+            )
+            result = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            return result, in_thinking_block, thinking_started, is_first_chunk, thinking_content
+
+        # 如果在思考块内，收集思考内容
+        if in_thinking_block:
+            thinking_content.append(content)
+            # 在思考块内也发送内容，但标记为思考内容
+            chunk = create_chunk(
+                sse_id=sse_id,
+                created=created,
+                content=content
+            )
+            result = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            return result, in_thinking_block, thinking_started, is_first_chunk, thinking_content
+
+        # 清理内容，移除思考块
+        content = clean_thinking_content(content)
+        # if not content:  # 如果清理后内容为空，跳过
+        #     return result, in_thinking_block, thinking_started, is_first_chunk, thinking_content
+
+        # 正常发送内容
         chunk = create_chunk(
             sse_id=sse_id,
             created=created,
-            content="<think>\n\n",
+            content=content,
             is_first=is_first_chunk
         )
         result = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-        return result, in_thinking_block, thinking_started, is_first_chunk, thinking_content
+        return result, in_thinking_block, thinking_started, False, thinking_content
 
-    # 检查是否是思考块的结束
-    if "```" in content and in_thinking_block:
-        in_thinking_block = False
-        # 发送思考块结束标记
-        chunk = create_chunk(
-            sse_id=sse_id,
-            created=created,
-            content="\n</think>\n\n"
-        )
-        result = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-        return result, in_thinking_block, thinking_started, is_first_chunk, thinking_content
-
-    # 如果在思考块内，收集思考内容
-    if in_thinking_block:
-        thinking_content.append(content)
-        # 在思考块内也发送内容，但标记为思考内容
-        chunk = create_chunk(
-            sse_id=sse_id,
-            created=created,
-            content=content
-        )
-        result = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-        return result, in_thinking_block, thinking_started, is_first_chunk, thinking_content
-
-    # 清理内容，移除思考块
-    content = clean_thinking_content(content)
-    if not content:  # 如果清理后内容为空，跳过
-        return result, in_thinking_block, thinking_started, is_first_chunk, thinking_content
-
-    # 正常发送内容
-    chunk = create_chunk(
-        sse_id=sse_id,
-        created=created,
-        content=content,
-        is_first=is_first_chunk
-    )
-    result = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-    return result, in_thinking_block, thinking_started, False, thinking_content
+    except Exception as e:
+        logger.error(f"处理消息事件时发生错误: {e}")
+        error_chunk = create_error_chunk(f"处理消息事件时发生错误: {e}")
+        return error_chunk, in_thinking_block, thinking_started, is_first_chunk, thinking_content
 
 
 def process_generate_end_event(data: dict, in_thinking_block: bool, thinking_content: list) -> List[str]:
@@ -390,6 +414,7 @@ def process_generate_end_event(data: dict, in_thinking_block: bool, thinking_con
     # 发送 [DONE] 标记
     result.append("data: [DONE]\n\n")
     return result
+
 async def generate_response(messages: List[dict], model: str, temperature: float, stream: bool,
                             max_tokens: Optional[int] = None, presence_penalty: float = 0,
                             frequency_penalty: float = 0, top_p: float = 1.0) -> AsyncGenerator[str, None]:
@@ -486,16 +511,11 @@ async def generate_response(messages: List[dict], model: str, temperature: float
 
                             # 处理消息事件
                             if current_event == "message":
-                                try:
-                                    result, in_thinking_block, thinking_started, is_first_chunk, thinking_content = await process_message_event(
-                                        data, is_first_chunk, in_thinking_block, thinking_started, thinking_content
-                                    )
-                                    if result:
-                                        yield result
-                                except Exception as e:
-                                    logger.error(f"处理消息事件时发生错误: {e}")
-                                    yield create_error_chunk(f"处理消息事件时发生错误: {e}") # 返回错误块
-                                    break  # 停止流
+                                result, in_thinking_block, thinking_started, is_first_chunk, thinking_content = await process_message_event(
+                                    data, is_first_chunk, in_thinking_block, thinking_started, thinking_content
+                                )
+                                if result:
+                                    yield result
 
                             # 处理生成结束事件
                             elif current_event == "generateEnd":
@@ -544,6 +564,7 @@ def create_error_chunk(error_message: str) -> str:
         }
     }
     return f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+
 
             
 @app.get("/")
