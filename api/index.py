@@ -256,21 +256,6 @@ async def verify_api_key(authorization: str = Header(None)):
         raise HTTPException(status_code=401, detail="Invalid API key")
     return api_key
 
-import json
-import time
-import uuid
-from typing import List, Tuple, Optional
-
-# 假设你已经有了这些函数和配置
-# from .utils import generate_timestamp, calculate_sha256, create_common_headers
-# from .config import Config
-# from .session_manager import session_manager
-# import httpx
-# from fastapi import HTTPException
-# import logging
-# logger = logging.getLogger(__name__)
-
-
 def create_chunk(sse_id: str, created: int, content: Optional[str] = None,
                  is_first: bool = False, meta: Optional[dict] = None,
                  finish_reason: Optional[str] = None) -> dict:
@@ -519,18 +504,13 @@ async def generate_response(messages: List[dict], model: str, temperature: float
 
                             # 处理生成结束事件
                             elif current_event == "generateEnd":
-                                try:
-                                    for chunk in process_generate_end_event(data, in_thinking_block, thinking_content):
-                                        yield chunk
-                                except Exception as e:
-                                    logger.error(f"处理生成结束事件时发生错误: {e}")
-                                    yield create_error_chunk(f"处理生成结束事件时发生错误: {e}") # 返回错误块
-                                    break # 停止流
+                                for chunk in process_generate_end_event(data, in_thinking_block, thinking_content):
+                                    yield chunk
+                                
 
                         except json.JSONDecodeError as e:
                             logger.error(f"JSON解析错误: {e}")
                             yield create_error_chunk(f"JSON解析错误: {e}") # 返回错误块
-                            break # 停止流
 
     except httpx.RequestError as e:
         logger.error(f"生成响应错误: {e}")
@@ -544,11 +524,6 @@ async def generate_response(messages: List[dict], model: str, temperature: float
             logger.error(f"重新初始化会话失败: {re_init_error}")
             yield create_error_chunk(f"重新初始化会话失败: {str(re_init_error)}") # 返回错误块
         # 不再抛出 HTTPException，而是尝试返回错误信息
-        yield "data: [DONE]\n\n" # 确保流结束
-        return
-    except Exception as e:
-        logger.error(f"其他错误: {e}")
-        yield create_error_chunk(f"其他错误: {str(e)}") # 返回错误块
         yield "data: [DONE]\n\n" # 确保流结束
         return
 
