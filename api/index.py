@@ -545,12 +545,6 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
     # 添加请求日志
     logger.info(f"Received chat request: model={request.model}, stream={request.stream}")
     messages = [msg.model_dump() for msg in request.messages]
-    headers = {
-        "X-Accel-Buffering": "no",  # 禁用代理缓冲
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",  # 保持连接
-        "Keep-Alive": "timeout=60, max=1000"  # 设置长连接参数
-    }
     if not request.stream:
         # 非流式响应处理
         content = ""
@@ -614,6 +608,12 @@ async def chat_completions(request: ChatCompletionRequest, authorization: str = 
         }
 
     # 流式响应
+    headers = {
+        "X-Accel-Buffering": "no",  # 禁用 Nginx 代理缓冲
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=60, max=1000"  # 长连接参数
+    }
     return StreamingResponse(
         generate_response(
             messages=messages,
