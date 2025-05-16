@@ -1,4 +1,9 @@
 {
+  "functions": {
+    "api/*.py": {
+      "maxDuration": 65536
+    }
+  }
 
   "builds": [
     {
