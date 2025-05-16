@@ -285,6 +285,104 @@ def create_chunk(sse_id: str, created: int, content: Optional[str] = None,
     }
 
 
+async def process_message_event(data: dict, is_first_chunk: bool, in_thinking_block: bool,
+                                thinking_started: bool, thinking_content: list) -> Tuple[str, bool, bool, bool, list]:
+    """处理消息事件"""
+    content = data.get("content", "")
+    timestamp = data.get("timestamp", "")
+    created = int(timestamp) // 1000 if timestamp else int(time.time())
+    sse_id = data.get('sseId', str(uuid.uuid4()))
+    result = ""
+
+    # 检查是否是思考块的开始
+    if "```ys_think" in content and not thinking_started:
+        thinking_started = True
+        in_thinking_block = True
+        # 发送思考块开始标记
+        chunk = create_chunk(
+            sse_id=sse_id,
+            created=created,
+            content="<think>\n\n",
+            is_first=is_first_chunk
+        )
+        result = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+        return result, in_thinking_block, thinking_started, is_first_chunk, thinking_content
+
+    # 检查是否是思考块的结束
+    if "```" in content and in_thinking_block:
+        in_thinking_block = False
+        # 发送思考块结束标记
+        chunk = create_chunk(
+            sse_id=sse_id,
+            created=created,
+            content="\n</think>\n\n"
+        )
+        result = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+        return result, in_thinking_block, thinking_started, is_first_chunk, thinking_content
+
+    # 如果在思考块内，收集思考内容
+    if in_thinking_block:
+        thinking_content.append(content)
+        # 在思考块内也发送内容，但标记为思考内容
+        chunk = create_chunk(
+            sse_id=sse_id,
+            created=created,
+            content=content
+        )
+        result = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+        return result, in_thinking_block, thinking_started, is_first_chunk, thinking_content
+
+    # 清理内容，移除思考块
+    content = clean_thinking_content(content)
+    if not content:  # 如果清理后内容为空，跳过
+        return result, in_thinking_block, thinking_started, is_first_chunk, thinking_content
+
+    # 正常发送内容
+    chunk = create_chunk(
+        sse_id=sse_id,
+        created=created,
+        content=content,
+        is_first=is_first_chunk
+    )
+    result = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+    return result, in_thinking_block, thinking_started, False, thinking_content
+
+
+def process_generate_end_event(data: dict, in_thinking_block: bool, thinking_content: list) -> List[str]:
+    """处理生成结束事件"""
+    result = []
+    timestamp = data.get("timestamp", "")
+    created = int(timestamp) // 1000 if timestamp else int(time.time())
+    sse_id = data.get('sseId', str(uuid.uuid4()))
+
+    # 如果思考块还没有结束，发送结束标记
+    if in_thinking_block:
+        end_thinking_chunk = create_chunk(
+            sse_id=sse_id,
+            created=created,
+            content="\n</think>\n\n"
+        )
+        result.append(f"data: {json.dumps(end_thinking_chunk, ensure_ascii=False)}\n\n")
+
+    # 添加元数据
+    meta_chunk = create_chunk(
+        sse_id=sse_id,
+        created=created,
+        meta={"thinking_content": "".join(thinking_content) if thinking_content else None}
+    )
+    result.append(f"data: {json.dumps(meta_chunk, ensure_ascii=False)}\n\n")
+
+    # 发送结束标记
+    end_chunk = create_chunk(
+        sse_id=sse_id,
+        created=created,
+        finish_reason="stop"
+    )
+    result.append(f"data: {json.dumps(end_chunk, ensure_ascii=False)}\n\n")
+    result.append("data: [DONE]\n\n")
+    return result
+
+
 async def generate_response(messages: List[dict], model: str, temperature: float, stream: bool,
                             max_tokens: Optional[int] = None, presence_penalty: float = 0,
                             frequency_penalty: float = 0, top_p: float = 1.0) -> AsyncGenerator[str, None]:
@@ -293,141 +391,78 @@ async def generate_response(messages: List[dict], model: str, temperature: float
     await session_manager.refresh_if_needed()
 
     timestamp = generate_timestamp()
+    messages_data = [{"role": m["role"], "content": m["content"]} for m in messages]
     payload = {
-        'userId': session_manager.user_id,
-        'botId': Config.BOT_ID,
-        'botAlias': 'custom',
-        'query': messages[-1]['content'],
-        'isRetry': False,
-        'breakingStrategy': 0,
-        'isNewConversation': True,
-        'mediaInfos': [],
-        'turnIndex': 0,
-        'rewriteQuery': '',
-        'conversationId': session_manager.conversation_id,
-        'capabilities': [
-            {
-                'capability': 'otherBot',
-                'capabilityRang': 0,
-                'defaultQuery': '',
-                'icon': 'https://wy-static.wenxiaobai.com/bot-capability/prod/%E6%B7%B1%E5%BA%A6%E6%80%9D%E8%80%83.png',
-                'minAppVersion': '',
-                'title': '深度思考(R1)',
-                'botId': 210029,
-                'botDesc': '深度回答这个问题（DeepSeek R1）',
-                'selectedIcon': 'https://wy-static.wenxiaobai.com/bot-capability/prod/%E6%B7%B1%E5%BA%A6%E6%80%9D%E8%80%83%E9%80%89%E4%B8%AD.png',
-                'botIcon': 'https://platform-dev-1319140468.cos.ap-nanjing.myqcloud.com/bot/avatar/2025/02/06/612cbff8-51e6-4c6a-8530-cb551bcfda56.webp',
-                'defaultHidden': False,
-                'defaultSelected': False,
-                'key': 'deep_think',
-                'promptMenu': False,
-                'isPromptMenu': False,
-                'defaultPlaceholder': '',
-                '_id': 'deep_think',
-            },
-        ],
-        'attachmentInfo': {
-            'url': {
-                'infoList': [],
-            },
-        },
-        'inputWay': 'proactive',
-        'pureQuery': '',
+        "temperature": temperature,
+        "messages": messages_data,
+        "stream": stream,
+        "model": model,
+        "presence_penalty": presence_penalty,
+        "frequency_penalty": frequency_penalty,
+        "top_p": top_p
     }
+
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+
     data = json.dumps(payload, separators=(',', ':'))
     digest = calculate_sha256(data)
 
-    # 创建流式请求的特殊头部
     headers = create_common_headers(timestamp, digest, session_manager.token, session_manager.device_id)
-    headers.update({
-        'accept': 'text/event-stream, text/event-stream',
-        'x-yuanshi-appversioncode': '',
-        'x-yuanshi-appversionname': '3.1.0',
-    })
 
-    try:
-        # 使用 stream=True 参数，实现真正的流式处理
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10)) as client:
-            async with client.stream('POST', f"{Config.BASE_URL}/core/conversation/chat/v1",
-                                     headers=headers, content=data) as response:
+    url = f"{Config.BASE_URL}/core/conversations/{session_manager.conversation_id}/completion"
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        try:
+            async with client.post(url, headers=headers, content=data, stream=True) as response:
                 response.raise_for_status()
 
-                # 初始化状态变量
-                is_first_chunk = True
-                in_thinking_block = False
-                thinking_content = []
-                sse_id = str(uuid.uuid4())  # 初始化 sse_id
+                in_thinking_block = False  # 标记是否在思考块内
+                thinking_started = False  # 标记是否已经开始思考
+                thinking_content = []  # 用于存储思考过程的内容
+                is_first_chunk = True # 标记是否是第一个chunk
 
-                async for line in response.aiter_lines():
-                    line = line.strip()
-                    if not line:
-                        continue
+                async for chunk in response.aiter_bytes():
+                    try:
+                        lines = chunk.decode('utf-8').splitlines()
+                        for line in lines:
+                            if not line.strip():
+                                continue
 
-                    if line.startswith("event: message"):
-                        try:
-                            data_line = next(response.aiter_lines())  # 获取数据行
-                            data_line = data_line.strip()
-                            if data_line.startswith("data:"):
-                                json_str = data_line[len("data:"):].strip()
-                                data = json.loads(json_str)
-                                content = data.get("content", "")
-                                timestamp = data.get("timestamp", "")
-                                created = int(timestamp) // 1000 if timestamp else int(time.time())
+                            try:
+                                event_data = json.loads(line)
+                                event_type = event_data.get("type")
+                                event_payload = event_data.get("payload", {})
 
-                                # 处理思考块
-                                if "```ys_think" in content:
-                                    in_thinking_block = True
-                                    content = content.replace("```ys_think", "")
-                                if "```" in content and in_thinking_block:
-                                    in_thinking_block = False
-                                    content = content.replace("```", "")
+                                if event_type == "message":
+                                    result, in_thinking_block, thinking_started, is_first_chunk, thinking_content = await process_message_event(
+                                        event_payload, is_first_chunk, in_thinking_block, thinking_started, thinking_content
+                                    )
+                                    if result:
+                                        yield result
 
-                                # 清理内容
-                                content = clean_thinking_content(content)
+                                elif event_type == "generate_end":
+                                    results = process_generate_end_event(event_payload, in_thinking_block, thinking_content)
+                                    for r in results:
+                                        yield r
 
-                                # 如果 content 为空，跳过
-                                if not content:
-                                    continue
+                                else:
+                                    logger.warning(f"未知事件类型: {event_type}")
 
-                                # 创建 chunk 数据
-                                chunk_data = create_chunk(
-                                    sse_id=sse_id,
-                                    created=created,
-                                    content=content,
-                                    is_first=is_first_chunk
-                                )
-                                is_first_chunk = False
+                            except json.JSONDecodeError as e:
+                                logger.error(f"JSON解码错误: {e}, line: {line}")
+                                continue
 
-                                # 将数据转换为 SSE 格式并 yield
-                                chunk_str = f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
-                                yield chunk_str
+                    except Exception as e:
+                        logger.error(f"处理响应块时发生错误: {e}")
+                        raise
 
-                        except StopIteration:
-                            logger.warning("流意外结束")
-                            break
-                        except json.JSONDecodeError as e:
-                            logger.error(f"JSON 解析错误: {e}, 内容: {line}")
-                            continue  # 或 break，取决于错误处理策略
-
-                # 发送结束块
-                end_chunk = create_chunk(
-                    sse_id=sse_id,
-                    created=int(time.time()),
-                    finish_reason="stop"
-                )
-                end_chunk_str = f"data: {json.dumps(end_chunk, ensure_ascii=False)}\n\n"
-                yield end_chunk_str
-                yield "data: [DONE]\n\n"
-
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP 错误: {e}, 状态码: {e.response.status_code}, 内容: {e.response.text}")
-        raise HTTPException(status_code=500, detail=f"服务器错误: {e.response.status_code}")
-    except httpx.RequestError as e:
-        logger.error(f"请求错误: {e}")
-        raise HTTPException(status_code=500, detail=f"请求失败: {str(e)}")
-    except Exception as e:
-        logger.exception("处理响应时发生未知错误")
-        raise HTTPException(status_code=500, detail=f"未知错误: {str(e)}")
+        except httpx.RequestError as e:
+            logger.error(f"请求失败: {e}")
+            raise HTTPException(status_code=500, detail=f"请求失败: {str(e)}")
+        except Exception as e:
+            logger.error(f"发生错误: {e}")
+            raise HTTPException(status_code=500, detail=f"发生错误: {str(e)}")
 
 
 @app.get("/v1/models")
@@ -436,10 +471,9 @@ async def list_models(api_key: str = Header(None)):
     await verify_api_key(api_key)
     model_data = [
         ModelData(
-            id=Config.DEFAULT_MODEL,
+            id="DeepSeek-R1",
             created=int(time.time()),
-            owned_by="wenxiaobai",
-            root=Config.DEFAULT_MODEL,
+            owned_by="wenxiaobai"
         )
     ]
     return {"data": model_data}
@@ -450,77 +484,23 @@ async def create_chat_completion(request: ChatCompletionRequest, authorization: 
     """创建聊天补全"""
     await verify_api_key(authorization)
 
-    # 确保 messages 列表不为空
-    if not request.messages:
-        raise HTTPException(status_code=400, detail="Messages list cannot be empty")
-
-    # 检查最后一个消息的角色是否为 "user"
-    if request.messages[-1].role != "user":
-        raise HTTPException(status_code=400, detail="Last message must be from the user")
-
-    # 从请求中提取参数
-    messages = [message.dict() for message in request.messages]
-    model = request.model or Config.DEFAULT_MODEL
-    temperature = request.temperature
-    stream = request.stream
-    max_tokens = request.max_tokens
-    presence_penalty = request.presence_penalty
-    frequency_penalty = request.frequency_penalty
-    top_p = request.top_p
-
-    if stream:
+    if request.stream:
         return StreamingResponse(
-            generate_response(messages, model, temperature, stream, max_tokens, presence_penalty, frequency_penalty, top_p),
+            generate_response(
+                request.messages, request.model, request.temperature, request.stream,
+                request.max_tokens, request.presence_penalty, request.frequency_penalty, request.top_p
+            ),
             media_type="text/event-stream"
         )
     else:
-        # 非流式处理
+        # 处理非流式请求
         response_content = ""
-        async for chunk in generate_response(messages, model, temperature, stream, max_tokens, presence_penalty, frequency_penalty, top_p):
-            if chunk.startswith("data: {"):
-                try:
-                    json_str = chunk[len("data: "):].strip()
-                    data = json.loads(json_str)
-                    if 'choices' in data and data['choices']:
-                        delta = data['choices'][0]['delta']
-                        if 'content' in delta:
-                            response_content += delta['content']
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON 解析错误: {e}, 内容: {chunk}")
-                    continue  # 或 break，取决于错误处理策略
+        async for chunk in generate_response(
+            request.messages, request.model, request.temperature, request.stream,
+            request.max_tokens, request.presence_penalty, request.frequency_penalty, request.top_p
+        ):
+            # 收集所有块的内容
+            response_content += chunk
+            # TODO: 解析 response_content 并返回完整的补全结果
 
-        return {
-            "id": str(uuid.uuid4()),
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": response_content
-                    },
-                    "finish_reason": "stop"
-                }
-            ],
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0
-            }
-        }
-
-
-@app.get("/health")
-async def health_check():
-    """健康检查端点"""
-    return {"status": "ok"}
-
-
-@app.on_event("startup")
-async def startup_event():
-    """在应用启动时初始化会话"""
-    logger.info("Starting up and initializing session...")
-    session_manager.initialize()
-    logger.info("Session initialized successfully.")
+        return {"error": "Non-streaming mode is not yet implemented"}
